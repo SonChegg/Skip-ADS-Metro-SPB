@@ -2,7 +2,7 @@
 
 **Автоматический пропуск рекламы и ускорение авторизации в Wi-Fi сети метрополитена (СПБ).**
 
-![Version](https://img.shields.io/badge/version-7.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
