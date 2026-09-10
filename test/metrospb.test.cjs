@@ -15,6 +15,9 @@ test('clicks only supported actions and preserves accelerated timer arguments', 
                 <button onclick="testState.skip++">Пропустить рекламу</button>
                 <div onclick="testState.trip++"><span>Обычная поездка</span></div>
                 <button onclick="testState.wrong++">Пропустить подписку</button>
+                <button onclick="testState.paid++">Turn-off advertising for 1 rub</button>
+                <button onclick="testState.connect++">Connect</button>
+                <button disabled onclick="testState.disabledNext++">Next</button>
                 <script>${userscript}</script>
                 <script>
                     const startedAt = performance.now();
@@ -41,6 +44,9 @@ test('clicks only supported actions and preserves accelerated timer arguments', 
                 skip: 0,
                 trip: 0,
                 wrong: 0,
+                paid: 0,
+                connect: 0,
+                disabledNext: 0,
                 next: 0,
                 timer: null
             };
@@ -71,6 +77,9 @@ test('clicks only supported actions and preserves accelerated timer arguments', 
         assert.equal(dom.window.testState.skip, 1);
         assert.equal(dom.window.testState.trip, 1);
         assert.equal(dom.window.testState.wrong, 0);
+        assert.equal(dom.window.testState.paid, 0);
+        assert.equal(dom.window.testState.connect, 1);
+        assert.equal(dom.window.testState.disabledNext, 0);
         assert.equal(dom.window.testState.next, 1);
         assert.deepEqual(Array.from(dom.window.testState.timer.args), ['A', 'B']);
         assert.ok(dom.window.testState.timer.elapsed >= 80);
