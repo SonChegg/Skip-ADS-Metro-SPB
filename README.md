@@ -4,7 +4,6 @@ Userscript для автоматического прохождения рекл
 Wi-Fi в метро Санкт-Петербурга.
 
 [![Version](https://img.shields.io/badge/version-2.0.0-2563eb.svg)](./metrospb.js)
-[![Tests](https://github.com/SonChegg/Skip-ADS-Metro-SPB/actions/workflows/test.yml/badge.svg)](https://github.com/SonChegg/Skip-ADS-Metro-SPB/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-MIT-059669.svg)](./LICENSE)
 
 Скрипт находит кнопки подключения и пропуска рекламы, ускоряет клиентские
