@@ -1,140 +1,285 @@
 // ==UserScript==
 // @name         Skip-ADS-Metro-SPB
-// @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Разблокировка доступа в интернет без просмотра рекламы
+// @namespace    https://github.com/SonChegg/Skip-ADS-Metro-SPB
+// @version      2.0.0
+// @description  Автоматически проходит рекламные экраны Wi-Fi в метро Санкт-Петербурга
+// @description:en Automatically passes advertising screens on Saint Petersburg Metro Wi-Fi
 // @author       SonClick
 // @match        *://*.wi-fi.ru/*
+// @match        *://wi-fi.ru/*
 // @match        *://*.vmet.ro/*
+// @match        *://vmet.ro/*
 // @match        *://*.gowifi.ru/*
+// @match        *://gowifi.ru/*
+// @run-at       document-start
+// @downloadURL  https://raw.githubusercontent.com/SonChegg/Skip-ADS-Metro-SPB/main/metrospb.js
+// @updateURL    https://raw.githubusercontent.com/SonChegg/Skip-ADS-Metro-SPB/main/metrospb.js
 // @grant        none
-// @license MIT
+// @license      MIT
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    console.log('Metro-Hack v7.0 (Aggressive) started...');
+    const VERSION = '2.0.0';
+    const TIMER_ACCELERATION = 20;
+    const MIN_ACCELERATED_DELAY = 1000;
+    const MAX_ACCELERATED_DELAY = 60000;
+    const MIN_RESULT_DELAY = 100;
+    const CLICK_COOLDOWN = 3000;
+    const SCAN_DEBOUNCE = 80;
+    const FALLBACK_SCAN_INTERVAL = 1500;
+    const MAX_TEXT_LENGTH = 80;
+    const VIDEO_RATE = 16;
 
-    let isVideoHackActive = false;
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    const nativeSetInterval = window.setInterval.bind(window);
+    const lastClickedAt = new WeakMap();
+    const managedVideos = new WeakSet();
+    let scanTimer = null;
 
-    // --- 1. ВЗЛОМ ТАЙМЕРОВ ---
-    const TIME_ACCELERATION = 50; 
-    const originalSetTimeout = window.setTimeout;
-    const originalSetInterval = window.setInterval;
+    const actionPatterns = [
+        /^(?:обычная|стандартная) поездка$/iu,
+        /^далее(?: через)?(?:\s+\d+)?$/iu,
+        /^пропустить(?: рекламу)?(?: через)?(?:\s+\d+)?$/iu,
+        /^закрыть$/iu,
+        /^войти(?: в интернет)?$/iu,
+        /^подключиться(?: к интернету)?$/iu,
+        /^продолжить(?: в интернет)?(?: через)?(?:\s+\d+)?$/iu,
+        /^(?:regular|standard) trip$/iu,
+        /^skip(?: ad| advertisement)?(?: in)?(?:\s+\d+)?$/iu,
+        /^(?:close|dismiss)$/iu,
+        /^(?:connect|go online|enter internet)$/iu,
+        /^continue(?: to (?:the )?internet)?(?: in)?(?:\s+\d+)?$/iu,
+        /^next(?: in)?(?:\s+\d+)?$/iu,
+        /^[×✕✖]$/u
+    ];
 
-    window.setTimeout = function(func, delay) {
-        return originalSetTimeout(func, delay > 10 ? delay / TIME_ACCELERATION : delay);
+    const clickableSelector = [
+        'button',
+        'a[href]',
+        '[role="button"]',
+        'input[type="button"]',
+        'input[type="submit"]'
+    ].join(',');
+
+    function accelerateDelay(delay) {
+        const numericDelay = Number(delay);
+
+        if (!Number.isFinite(numericDelay)) return delay;
+        if (numericDelay < MIN_ACCELERATED_DELAY || numericDelay > MAX_ACCELERATED_DELAY) {
+            return numericDelay;
+        }
+
+        return Math.max(MIN_RESULT_DELAY, numericDelay / TIMER_ACCELERATION);
+    }
+
+    // Сохраняем нативную сигнатуру, включая дополнительные аргументы callback.
+    window.setTimeout = function (handler, delay, ...args) {
+        return nativeSetTimeout(handler, accelerateDelay(delay), ...args);
     };
-    window.setInterval = function(func, delay) {
-        return originalSetInterval(func, delay > 10 ? delay / TIME_ACCELERATION : delay);
+
+    window.setInterval = function (handler, delay, ...args) {
+        return nativeSetInterval(handler, accelerateDelay(delay), ...args);
     };
 
-    // --- 2. ФУНКЦИЯ "ТЯЖЕЛОГО" КЛИКА ---
-    function triggerEvents(element) {
-        // Набор событий для эмуляции реального нажатия
-        const events = [
-            new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }),
-            new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }),
-            new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }),
-            new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
-        ];
+    function normalizeText(value) {
+        return String(value || '')
+            .replace(/\s+/gu, ' ')
+            .trim()
+            .toLowerCase();
+    }
 
-        // Отправляем события
-        events.forEach(event => element.dispatchEvent(event));
-        
-        // Обычный клик (на всякий случай)
+    function getElementText(element) {
+        if (element instanceof HTMLInputElement) {
+            return normalizeText(element.value || element.getAttribute('aria-label'));
+        }
+
+        return normalizeText(
+            element.innerText ||
+            element.textContent ||
+            element.getAttribute('aria-label') ||
+            element.getAttribute('title')
+        );
+    }
+
+    function isActionText(text) {
+        return text.length > 0 &&
+            text.length <= MAX_TEXT_LENGTH &&
+            actionPatterns.some((pattern) => pattern.test(text));
+    }
+
+    function isVisibleAndEnabled(element) {
+        if (!(element instanceof HTMLElement)) return false;
+        if (element.matches(':disabled, [aria-disabled="true"]')) return false;
+
+        const style = window.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+            return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function canClick(element) {
+        const lastClick = lastClickedAt.get(element) || 0;
+        return Date.now() - lastClick >= CLICK_COOLDOWN;
+    }
+
+    function clickElement(element, reason) {
+        if (!isVisibleAndEnabled(element) || !canClick(element)) return false;
+
+        lastClickedAt.set(element, Date.now());
+        console.info(`[Skip-ADS ${VERSION}] Нажимаю: ${reason}`);
         element.click();
+        nativeSetTimeout(() => scheduleScan(document), 150);
+        return true;
+    }
 
-        // Эмуляция Touch (для iOS/Android)
+    function findClickableElements(root) {
+        if (!(root instanceof Element || root instanceof Document)) return [];
+
+        const elements = [];
+        if (root instanceof Element && root.matches(clickableSelector)) elements.push(root);
+        elements.push(...root.querySelectorAll(clickableSelector));
+        return elements;
+    }
+
+    function processControls(root = document) {
+        for (const element of findClickableElements(root)) {
+            const text = getElementText(element);
+            if (isActionText(text) && clickElement(element, text)) return true;
+        }
+
+        // На портале подпись иногда лежит в span/p или в "голом" div,
+        // а обработчик клика висит выше. click() всплывёт до обработчика,
+        // при этом мы не долбим подряд сам элемент и всех его родителей.
+        const textFallbackSelector = 'span, p, div';
+        for (const element of root.querySelectorAll?.(textFallbackSelector) || []) {
+            if (element.closest(clickableSelector)) continue;
+            if (element.children.length > 0) continue;
+
+            const text = getElementText(element);
+            if (isActionText(text) && clickElement(element, text)) return true;
+        }
+
+        const iconSelectors = [
+            '[aria-label*="закрыть" i]',
+            '[aria-label*="close" i]',
+            '[title*="закрыть" i]',
+            '[title*="close" i]',
+            'button[class*="close" i]',
+            'button[class*="skip" i]',
+            '[role="button"][class*="close" i]',
+            '[role="button"][class*="skip" i]'
+        ].join(',');
+
+        for (const element of root.querySelectorAll?.(iconSelectors) || []) {
+            if (clickElement(element, getElementText(element) || 'кнопка закрытия')) return true;
+        }
+
+        return false;
+    }
+
+    function optimizeVideo(video) {
+        if (video.ended) return;
+
+        video.muted = true;
         try {
-            const touchEvent = new Event('touchstart', { bubbles: true });
-            element.dispatchEvent(touchEvent);
-            element.dispatchEvent(new Event('touchend', { bubbles: true }));
-        } catch (e) {}
-    }
-
-    function tryClick(el, source) {
-        if (el && el.offsetParent !== null) { 
-            // 1. Рисуем рамку, чтобы видеть, что нашли
-            el.style.border = "4px solid red";
-            
-            console.log(`[CLICK] Clicking on: ${source}`, el);
-
-            // 2. Кликаем по САМОМУ элементу
-            triggerEvents(el);
-
-            // 3. Кликаем по РОДИТЕЛЮ (!!! ВАЖНО !!!)
-            // Часто текст "Обычная поездка" лежит внутри span, а кликабельный div снаружи
-            if (el.parentElement) {
-                el.parentElement.style.border = "2px dashed yellow"; // Помечаем родителя
-                triggerEvents(el.parentElement);
+            if (video.playbackRate !== VIDEO_RATE) {
+                video.playbackRate = VIDEO_RATE;
             }
+            video.defaultPlaybackRate = VIDEO_RATE;
+        } catch (error) {
+            console.debug(`[Skip-ADS ${VERSION}] Не удалось ускорить видео`, error);
+        }
+
+        if (video.paused) {
+            const playPromise = video.play();
+            if (playPromise?.catch) playPromise.catch(() => {});
         }
     }
 
-    // --- 3. ПОИСК ---
-    function scanAndClick() {
-        const triggerKeyword = "обычная поездка";
-        const alwaysClickKeywords = [
-            "далее", "пропустить", "закрыть", "close", "skip", "войти", "next", "×", "✕", "✖"
-        ];
+    function processVideos(root = document) {
+        const videos = [];
+        if (root instanceof HTMLVideoElement) videos.push(root);
+        if (root.querySelectorAll) videos.push(...root.querySelectorAll('video'));
 
-        const elements = document.querySelectorAll('button, a, div, span, p, input');
-
-        for (let el of elements) {
-            let text = "";
-            if (el.tagName === 'INPUT' && el.type === 'button') text = el.value || "";
-            else text = el.innerText || "";
-            
-            text = text.toLowerCase().trim();
-            if (!text || text.length > 50) continue; 
-
-            // --- Кнопка "Обычная поездка" ---
-            if (text.includes(triggerKeyword)) {
-                isVideoHackActive = true; 
-                tryClick(el, `MAIN TRIGGER: ${text}`);
-                // Не делаем return, вдруг там еще кнопка "Далее" сразу
+        for (const video of videos) {
+            if (!managedVideos.has(video)) {
+                managedVideos.add(video);
+                video.addEventListener('loadedmetadata', () => optimizeVideo(video));
+                video.addEventListener('canplay', () => optimizeVideo(video));
+                video.addEventListener('ratechange', () => {
+                    if (video.playbackRate !== VIDEO_RATE) optimizeVideo(video);
+                });
             }
 
-            // --- Остальные кнопки ---
-            if (alwaysClickKeywords.some(k => text.includes(k))) {
-                tryClick(el, `ALWAYS: ${text}`);
-            }
-        }
-        
-        // Крестики (без текста)
-        const closeIcons = document.querySelectorAll('[class*="close"], [class*="skip"], [class*="cross"]');
-        for (let btn of closeIcons) {
-             if (btn.offsetWidth > 0 && btn.offsetWidth < 100) {
-                 // Тут родителя не кликаем, обычно крестик сам по себе кнопка
-                 btn.style.border = "3px solid orange";
-                 btn.click();
-             }
+            optimizeVideo(video);
         }
     }
 
-    // --- 4. ВИДЕО ---
-    function superFastVideo() {
-        if (!isVideoHackActive) return;
-
-        const videos = document.querySelectorAll('video');
-        for (let v of videos) {
-            if (v.playbackRate !== 16.0 && !v.ended) {
-                v.muted = true;
-                v.playbackRate = 16.0; 
-                v.play().catch(() => {});
-                v.style.border = "5px solid blue"; 
-            }
-        }
-    }
-
-    // Запуск цикла
-    setInterval(() => {
+    function scan(root = document) {
         try {
-            scanAndClick();   
-            superFastVideo(); 
-        } catch (e) {}
-    }, 400);
+            processControls(root);
+            processVideos(root);
+        } catch (error) {
+            console.debug(`[Skip-ADS ${VERSION}] Ошибка сканирования`, error);
+        }
+    }
 
+    function scheduleScan(root = document) {
+        if (scanTimer !== null) return;
+
+        scanTimer = nativeSetTimeout(() => {
+            scanTimer = null;
+            scan(root);
+        }, SCAN_DEBOUNCE);
+    }
+
+    function start() {
+        console.info(`[Skip-ADS ${VERSION}] Запущен на ${location.hostname}`);
+        scan(document);
+
+        const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                    scheduleScan(document);
+                    return;
+                }
+
+                if (mutation.type === 'attributes') {
+                    scheduleScan(document);
+                    return;
+                }
+
+                if (mutation.type === 'characterData') {
+                    scheduleScan(document);
+                    return;
+                }
+            }
+        });
+
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            characterData: true,
+            attributeFilter: [
+                'class',
+                'style',
+                'hidden',
+                'disabled',
+                'aria-disabled',
+                'src'
+            ]
+        });
+
+        // Редкая страховочная проверка для изменений, которые не меняют DOM.
+        nativeSetInterval(() => scan(document), FALLBACK_SCAN_INTERVAL);
+    }
+
+    if (document.documentElement) start();
+    else document.addEventListener('DOMContentLoaded', start, { once: true });
 })();
