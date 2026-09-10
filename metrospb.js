@@ -3,6 +3,7 @@
 // @namespace    https://github.com/SonChegg/Skip-ADS-Metro-SPB
 // @version      2.0.0
 // @description  Автоматически проходит рекламные экраны Wi-Fi в метро Санкт-Петербурга
+// @description:en Automatically passes advertising screens on Saint Petersburg Metro Wi-Fi
 // @author       SonClick
 // @match        *://*.wi-fi.ru/*
 // @match        *://wi-fi.ru/*
@@ -34,20 +35,23 @@
     const nativeSetTimeout = window.setTimeout.bind(window);
     const nativeSetInterval = window.setInterval.bind(window);
     const lastClickedAt = new WeakMap();
+    const managedVideos = new WeakSet();
     let scanTimer = null;
 
     const actionPatterns = [
-        /^обычная поездка$/iu,
-        /^далее$/iu,
-        /^пропустить(?: рекламу)?$/iu,
+        /^(?:обычная|стандартная) поездка$/iu,
+        /^далее(?: через)?(?:\s+\d+)?$/iu,
+        /^пропустить(?: рекламу)?(?: через)?(?:\s+\d+)?$/iu,
         /^закрыть$/iu,
         /^войти(?: в интернет)?$/iu,
         /^подключиться(?: к интернету)?$/iu,
-        /^продолжить$/iu,
-        /^skip(?: ad)?$/iu,
-        /^close$/iu,
-        /^connect$/iu,
-        /^next$/iu,
+        /^продолжить(?: в интернет)?(?: через)?(?:\s+\d+)?$/iu,
+        /^(?:regular|standard) trip$/iu,
+        /^skip(?: ad| advertisement)?(?: in)?(?:\s+\d+)?$/iu,
+        /^(?:close|dismiss)$/iu,
+        /^(?:connect|go online|enter internet)$/iu,
+        /^continue(?: to (?:the )?internet)?(?: in)?(?:\s+\d+)?$/iu,
+        /^next(?: in)?(?:\s+\d+)?$/iu,
         /^[×✕✖]$/u
     ];
 
@@ -129,6 +133,7 @@
         lastClickedAt.set(element, Date.now());
         console.info(`[Skip-ADS ${VERSION}] Нажимаю: ${reason}`);
         element.click();
+        nativeSetTimeout(() => scheduleScan(document), 150);
         return true;
     }
 
@@ -144,7 +149,7 @@
     function processControls(root = document) {
         for (const element of findClickableElements(root)) {
             const text = getElementText(element);
-            if (isActionText(text)) clickElement(element, text);
+            if (isActionText(text) && clickElement(element, text)) return true;
         }
 
         // На портале подпись иногда лежит в span/p или в "голом" div,
@@ -156,7 +161,7 @@
             if (element.children.length > 0) continue;
 
             const text = getElementText(element);
-            if (isActionText(text)) clickElement(element, text);
+            if (isActionText(text) && clickElement(element, text)) return true;
         }
 
         const iconSelectors = [
@@ -171,7 +176,28 @@
         ].join(',');
 
         for (const element of root.querySelectorAll?.(iconSelectors) || []) {
-            clickElement(element, getElementText(element) || 'кнопка закрытия');
+            if (clickElement(element, getElementText(element) || 'кнопка закрытия')) return true;
+        }
+
+        return false;
+    }
+
+    function optimizeVideo(video) {
+        if (video.ended) return;
+
+        video.muted = true;
+        try {
+            if (video.playbackRate !== VIDEO_RATE) {
+                video.playbackRate = VIDEO_RATE;
+            }
+            video.defaultPlaybackRate = VIDEO_RATE;
+        } catch (error) {
+            console.debug(`[Skip-ADS ${VERSION}] Не удалось ускорить видео`, error);
+        }
+
+        if (video.paused) {
+            const playPromise = video.play();
+            if (playPromise?.catch) playPromise.catch(() => {});
         }
     }
 
@@ -181,18 +207,16 @@
         if (root.querySelectorAll) videos.push(...root.querySelectorAll('video'));
 
         for (const video of videos) {
-            if (video.ended) continue;
-
-            video.muted = true;
-            try {
-                video.playbackRate = VIDEO_RATE;
-                video.defaultPlaybackRate = VIDEO_RATE;
-            } catch (error) {
-                console.debug(`[Skip-ADS ${VERSION}] Не удалось ускорить видео`, error);
+            if (!managedVideos.has(video)) {
+                managedVideos.add(video);
+                video.addEventListener('loadedmetadata', () => optimizeVideo(video));
+                video.addEventListener('canplay', () => optimizeVideo(video));
+                video.addEventListener('ratechange', () => {
+                    if (video.playbackRate !== VIDEO_RATE) optimizeVideo(video);
+                });
             }
 
-            const playPromise = video.play();
-            if (playPromise?.catch) playPromise.catch(() => {});
+            optimizeVideo(video);
         }
     }
 
@@ -229,6 +253,11 @@
                     scheduleScan(document);
                     return;
                 }
+
+                if (mutation.type === 'characterData') {
+                    scheduleScan(document);
+                    return;
+                }
             }
         });
 
@@ -236,7 +265,15 @@
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['class', 'style', 'hidden', 'disabled', 'aria-disabled']
+            characterData: true,
+            attributeFilter: [
+                'class',
+                'style',
+                'hidden',
+                'disabled',
+                'aria-disabled',
+                'src'
+            ]
         });
 
         // Редкая страховочная проверка для изменений, которые не меняют DOM.
